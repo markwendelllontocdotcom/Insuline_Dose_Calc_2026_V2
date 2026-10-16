@@ -602,6 +602,104 @@ p, h1, h2, h3 { margin: 0; }
 .libre-btns .primary { background: #00703C; border-color: #00703C; color: #fff; }
 .libre-btns button:focus-visible { outline: 3px solid #0070C0; outline-offset: 2px; }
 
+/* ---------- Live Libre readings ---------- */
+/* The Libre line takes the title's place when a relay is set up (the title stays for screen readers) */
+.title.title-off {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.libre-line {
+  width: 100%;
+  min-width: 0;
+  height: clamp(32px, calc(var(--u) * 4.6), 42px);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  background: #f2f2f2;
+  color: #000;
+  border: 1.5px solid #6b6b6b;
+  border-radius: 9px;
+  font-size: min(clamp(12.5px, calc(var(--u) * 2.25), 17px), 3.9vw);
+  font-weight: 800;
+  line-height: 1;
+  text-align: left;
+}
+.ll-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: #8a8a8a; }
+.ll-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.libre-line .arrow-icon { width: 1.15em; height: 1.15em; vertical-align: -0.22em; }
+.libre-line.tone-ok .ll-dot { background: #00B050; }
+.libre-line.tone-offer { border-color: #0070C0; }
+.libre-line.tone-offer .ll-dot { background: #0070C0; }
+.libre-line.tone-warn { border-color: #E36C09; }
+.libre-line.tone-warn .ll-dot { background: #E36C09; }
+.libre-line.tone-bad { border-color: #C00000; color: #C00000; }
+.libre-line.tone-bad .ll-dot { background: #C00000; }
+.libre-line.busy .ll-dot { animation: ll-busy 0.9s ease-in-out infinite alternate; }
+@keyframes ll-busy { from { opacity: 1; } to { opacity: 0.25; } }
+
+/* A newer Libre reading just came in: the reading box flashes blue */
+.box-reading.libre-new { animation: libre-new 1.8s ease-out; }
+@keyframes libre-new {
+  0%, 45% { box-shadow: 0 0 0 4px #4DA3FF; }
+  100% { box-shadow: 0 0 0 0 rgba(77, 163, 255, 0); }
+}
+
+/* Connect box */
+.libre-info { font-size: 15.5px; line-height: 1.35; text-align: left; }
+.libre-warn {
+  padding: 9px 10px;
+  background: var(--yellow);
+  color: #000;
+  border: 2px solid #000;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.3;
+  text-align: left;
+}
+.libre-key-label { margin-bottom: -6px; font-size: 15px; font-weight: 800; text-align: left; }
+.libre-key {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 10px;
+  background: #fff;
+  color: #000;
+  border: 2px solid #000;
+  border-radius: 9px;
+  outline: none;
+  font: inherit;
+  font-size: 16px; /* 16px or more stops iPhone zooming in */
+  font-weight: 600;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.doc-btn {
+  min-height: 46px;
+  margin: 4px 0 8px;
+  padding: 8px 14px;
+  background: #00703C;
+  color: #fff;
+  border: 2px solid #00703C;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 800;
+}
+
 /* Trend arrow icon (drawn, so every arrow looks the same) */
 .arrow-icon { display: inline-block; width: 1.05em; height: 1.05em; vertical-align: -0.17em; }
 .arrow-btn .arrow-icon { width: 1.15em; height: 1.15em; vertical-align: middle; }
@@ -688,3 +786,14 @@ html, body { background: #000; color: #fff; }
 .libre-btns button { background: var(--field); color: #fff; border-color: #fff; }
 .libre-btns .primary { background: #00703C; border-color: #00703C; color: #fff; }
 .libre-btns button:focus-visible { outline-color: #4DA3FF; }
+
+/* Live Libre line and connect box */
+.libre-line { background: #121212; color: #fff; border-color: var(--field-line); }
+.libre-line.tone-offer { border-color: #4DA3FF; }
+.libre-line.tone-offer .ll-dot { background: #4DA3FF; }
+.libre-line.tone-warn { border-color: #FFA040; }
+.libre-line.tone-warn .ll-dot { background: #FFA040; }
+.libre-line.tone-bad { border-color: #FF7A7A; color: #FF9A9A; }
+.libre-line.tone-bad .ll-dot { background: #FF5A5A; }
+.libre-warn { color: #000; }
+.libre-key { background: var(--field); color: #fff; border-color: #fff; }

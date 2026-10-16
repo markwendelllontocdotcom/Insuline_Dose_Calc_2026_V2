@@ -436,3 +436,129 @@ test('Libre age text', () => {
   assert.equal(ageText(120), '2 h ago');
   assert.equal(ageText(-1), 'just now');
 });
+
+/* ---------------- Live Libre readings (relay) ---------------- */
+
+const { clockSkew, checkRelayReply, liveAction, liveLine } = app;
+
+test('Live Libre: the relay answer gets the same checks as a Shortcut reading', () => {
+  const now = new Date('2026-10-16T13:00:00Z');
+  const r = checkRelayReply({ ok: true, bg: 142, ts: '10/16/2026 12:58:30 PM', trend: 4 }, now);
+  assert.equal(r.ok, true);
+  assert.equal(r.value, 142);
+  assert.equal(r.takenAt.toISOString(), '2026-10-16T12:58:30.000Z');
+  assert.equal(r.arrow.key, 'up');
+  assert.equal(checkRelayReply({ ok: true, bg: 142, ts: '10/16/2026 12:58:30 PM', trend: null }, now).arrow, null);
+  assert.equal(checkRelayReply({ ok: true, bg: 142, ts: '10/16/2026 12:49:00 PM', trend: 3 }, now).reason, 'old');
+  assert.equal(checkRelayReply({ ok: true, bg: 38, ts: '10/16/2026 12:59:00 PM', trend: 1 }, now).reason, 'range');
+  assert.equal(checkRelayReply({ ok: true, bg: 600, ts: '10/16/2026 12:59:00 PM', trend: 5 }, now).reason, 'range');
+  assert.equal(checkRelayReply({ ok: true, bg: 120, ts: '10/16/2026 1:10:00 PM', trend: 3 }, now).reason, 'future');
+  assert.equal(checkRelayReply({ ok: true, bg: null, ts: '10/16/2026 12:59:00 PM' }, now).reason, 'missing');
+  assert.deepEqual(checkRelayReply({ ok: false, reason: 'busy', retryAfter: 120 }, now),
+    { ok: false, reason: 'relay', relayReason: 'busy', retryAfter: 120 });
+  for (const bad of [null, undefined, 'text', 42]) {
+    assert.equal(checkRelayReply(bad, now).relayReason, 'upstream', String(bad));
+  }
+});
+
+test('Live Libre: fills an empty box, keeps a Libre reading up to date, never changes a typed reading', () => {
+  const t = (mm) => new Date(Date.UTC(2026, 9, 16, 12, mm));
+  const fresh = (mm) => ({ ok: true, value: 150, takenAt: t(mm), arrow: null });
+  const box = (o) => Object.assign({ reading: '', libreTakenAt: null, autoFill: true, focused: false, sheetOpen: false }, o);
+
+  assert.equal(liveAction(box(), fresh(58)), 'fill');
+  assert.equal(liveAction(box({ reading: '142', libreTakenAt: t(57) }), fresh(58)), 'update');
+  assert.equal(liveAction(box({ reading: '142', libreTakenAt: t(58) }), fresh(58)), 'none', 'same reading');
+  assert.equal(liveAction(box({ reading: '142', libreTakenAt: t(59) }), fresh(58)), 'none', 'older reading');
+  // Typed by hand: only offered
+  assert.equal(liveAction(box({ reading: '130' }), fresh(58)), 'offer');
+  // Right after Clear (no auto-fill) or while typing: only offered
+  assert.equal(liveAction(box({ autoFill: false }), fresh(58)), 'offer');
+  assert.equal(liveAction(box({ focused: true }), fresh(58)), 'offer');
+  // While the box is being typed in, a newer reading is only offered (it updates once the keypad closes)
+  assert.equal(liveAction(box({ reading: '142', libreTakenAt: t(57), focused: true }), fresh(58)), 'offer');
+  // While a Libre box is open over the calculator nothing happens
+  assert.equal(liveAction(box({ sheetOpen: true }), fresh(58)), 'none');
+  assert.equal(liveAction(box({ reading: '142', libreTakenAt: t(57), sheetOpen: true }), fresh(58)), 'none');
+});
+
+test('Live Libre: a newer reading that cannot be used (LO, HI, clock) removes the Libre reading', () => {
+  const t = (mm) => new Date(Date.UTC(2026, 9, 16, 12, mm));
+  const box = (o) => Object.assign({ reading: '', libreTakenAt: null, autoFill: true, focused: false, sheetOpen: false }, o);
+  const lo = { ok: false, reason: 'range', value: 39, takenAt: t(59), arrow: null };
+  assert.equal(liveAction(box({ reading: '45', libreTakenAt: t(58) }), lo), 'remove');
+  assert.equal(liveAction(box(), lo), 'none', 'empty box stays empty');
+  assert.equal(liveAction(box({ reading: '130' }), lo), 'none', 'typed reading is never touched');
+  assert.equal(liveAction(box({ reading: '45', libreTakenAt: t(59) }), lo), 'none', 'not newer');
+  assert.equal(liveAction(box({ reading: '45', libreTakenAt: t(58) }), { ok: false, reason: 'relay', relayReason: 'busy' }), 'none');
+  assert.equal(liveAction(box({ reading: '45', libreTakenAt: t(58) }), null), 'none');
+});
+
+test('Live Libre: the line at the top', () => {
+  const now = new Date('2026-10-16T13:00:00Z');
+  const ok = checkRelayReply({ ok: true, bg: 142, ts: '10/16/2026 12:58:30 PM', trend: 4 }, now);
+  assert.deepEqual(liveLine({ connected: false }), { tone: 'off', before: 'Libre: tap to connect live readings', arrowKey: null, after: '',
+    text: 'Libre: tap to connect live readings', label: 'Libre: tap to connect live readings', tap: 'connect' });
+  assert.equal(liveLine({ connected: true, result: null }).text, 'Libre: getting the latest reading…');
+  assert.equal(liveLine({ connected: true, network: true, result: ok }).tone, 'off');
+
+  const inUse = liveLine({ connected: true, result: ok, inUse: true });
+  assert.equal(inUse.text, 'Libre 142 ↗ · 1 min ago · in use');
+  assert.equal(inUse.tone, 'ok');
+  assert.equal(inUse.arrowKey, 'up');
+  assert.equal(inUse.tap, 'refresh');
+  assert.equal(inUse.label, 'Libre 142, rising · 1 min ago · in use'); // what a screen reader says
+  assert.equal(liveLine({ connected: true, result: ok, inUse: true, arrowDiffers: true }).text, 'Libre 142 ↗ · 1 min ago · check arrow');
+  const offer = liveLine({ connected: true, result: ok, inUse: false });
+  assert.equal(offer.text, 'Libre 142 ↗ · 1 min ago · tap to use');
+  assert.equal(offer.tap, 'use');
+  // A reading older than the one in the box is shown but never offered
+  const older = liveLine({ connected: true, result: ok, inUse: false, older: true });
+  assert.equal(older.text, 'Libre 142 ↗ · 1 min ago');
+  assert.equal(older.tap, 'refresh');
+  const clock = checkRelayReply({ ok: true, bg: 142, ts: '10/16/2026 12:58:30 PM', trend: 4 }, now, 5 * 60000);
+  assert.equal(liveLine({ connected: true, result: clock }).text, 'Phone clock is wrong – type the reading');
+
+  const old = checkRelayReply({ ok: true, bg: 142, ts: '10/16/2026 12:46:00 PM', trend: 3 }, now);
+  assert.equal(liveLine({ connected: true, result: old }).text, 'Libre 142 · 14 min old – scan the sensor');
+  assert.equal(liveLine({ connected: true, result: old }).tap, 'refresh');
+  const lo = checkRelayReply({ ok: true, bg: 39, ts: '10/16/2026 12:59:00 PM', trend: 1 }, now);
+  assert.equal(liveLine({ connected: true, result: lo }).text, 'Libre shows LO – do a finger-prick check');
+  const hi = checkRelayReply({ ok: true, bg: 501, ts: '10/16/2026 12:59:00 PM', trend: 5 }, now);
+  assert.equal(liveLine({ connected: true, result: hi }).text, 'Libre shows HI – do a finger-prick check');
+
+  const relay = (reason, retryAfter) => liveLine({ connected: true, result: checkRelayReply({ ok: false, reason, retryAfter }, now) });
+  assert.equal(relay('key').tap, 'connect');
+  assert.equal(relay('busy', 120).text, 'Libre: busy – trying again in 2 min');
+  assert.equal(relay('locked', 300).text, 'Libre: busy – trying again in 5 min');
+  assert.equal(relay('many').text, 'Libre: account follows several people');
+  assert.equal(relay('something-new').text, 'Libre not answering – type the reading');
+  // Every line fits on one line of a phone screen
+  assert.equal(relay('patient_changed').text, 'Libre: account follows someone new');
+  assert.equal(relay('setup').text, 'Libre relay settings missing (Cloudflare)');
+  for (const reason of ['key', 'setup', 'login', 'terms', 'busy', 'no_follow', 'many', 'patient_changed', 'no_reading', 'origin', 'upstream']) {
+    assert.ok(relay(reason).text.length <= 44, reason + ': ' + relay(reason).text);
+  }
+});
+
+test('Live Libre: a phone clock more than 2 minutes off means the reading is not used', () => {
+  const now = new Date('2026-10-16T13:00:00Z');
+  const reply = { ok: true, bg: 142, ts: '10/16/2026 12:58:30 PM', trend: 4, fetchedAt: '2026-10-16T13:00:00.000Z' };
+  assert.equal(clockSkew(reply, Date.parse('2026-10-16T13:00:20Z')), 20000);
+  assert.equal(clockSkew({ ok: true }, Date.now()), null);
+  assert.equal(clockSkew(null, Date.now()), null);
+  assert.equal(checkRelayReply(reply, now, 20000).ok, true, '20 s (cached answer, slow network) is fine');
+  assert.equal(checkRelayReply(reply, now, 2 * 60000).ok, true);
+  assert.equal(checkRelayReply(reply, now, null).ok, true, 'no time from the relay: the usual checks only');
+  // Phone 8 minutes slow and the sensor stopped 15 minutes ago: the phone would think it is 7 minutes old
+  const slow = checkRelayReply({ ok: true, bg: 150, ts: '10/16/2026 12:37:00 PM', trend: 3 }, new Date('2026-10-16T12:44:00Z'), -8 * 60000);
+  assert.equal(slow.ok, false);
+  assert.equal(slow.reason, 'clock');
+  assert.equal(slow.value, 150);
+  assert.match(libreProblemText(slow), /clock is not right/);
+  assert.equal(checkRelayReply(reply, now, 3 * 60000).reason, 'clock');
+  // A newer reading that cannot be trusted removes a Libre reading from the box
+  const t = (mm) => new Date(Date.UTC(2026, 9, 16, 12, mm));
+  const box = { reading: '140', libreTakenAt: t(30), autoFill: true, focused: false, sheetOpen: false };
+  assert.equal(liveAction(box, slow), 'remove');
+});

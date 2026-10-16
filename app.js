@@ -1,7 +1,8 @@
 /*
  * Insulin Dose Calculator
  * Helper tool only – always check against the written plan and follow the care team's advice.
- * Everything runs on this phone. Nothing is saved or sent anywhere.
+ * Everything runs on this phone. The only thing it ever asks the internet for is the latest Libre reading,
+ * and only when live Libre readings are set up (APP_SETTINGS.libreLive, see README).
  */
 'use strict';
 
@@ -111,7 +112,14 @@ const APP_SETTINGS = {
   // Reading sent by the Libre Shortcut (see README): refused when older than this,
   // or when it is more than a couple of minutes "in the future" (phone clock wrong),
   // or outside the range the sensor can show (below 40 = LO, above 500 = HI).
-  libre: { maxAgeMinutes: 10, futureToleranceMinutes: 2, min: 40, max: 500 }
+  libre: { maxAgeMinutes: 10, futureToleranceMinutes: 2, min: 40, max: 500 },
+  // Live Libre readings through your Libre relay (see README). Leave relayUrl empty to switch this off.
+  libreLive: {
+    relayUrl: '',          // your relay's address, e.g. 'https://libre-relay.YOUR-NAME.workers.dev'
+    everySeconds: 60,      // how often to ask while the calculator is open
+    timeoutSeconds: 15,    // give up on one try after this long
+    minTapSeconds: 5       // tapping the Libre line asks again at most this often
+  }
 };
 
 // The arrow for a LibreLinkUp TrendArrow number (1–5), or null. It is shown in the Libre box but NOT
@@ -334,12 +342,129 @@ function libreProblemText(result) {
     case 'missing': return 'Could not get a reading from Libre. Check the Libre app and type the reading yourself.';
     case 'range': return 'Libre shows ' + (result.value < limits.min ? 'LO' : 'HI') + '. Do a finger-prick check and type the reading yourself.';
     case 'future': return 'The reading time does not match this phone’s clock. Check the Libre app and type the reading yourself.';
+    case 'clock': return 'This phone’s clock is not right, so the age of the Libre reading cannot be checked. Set the clock to automatic (Settings → General → Date & Time) and type the reading yourself.';
     case 'expired': return 'The Libre reading is now ' + ageText(result.ageMinutes).replace(' ago', ' old') +
       ', so it was removed from the calculator. Check the Libre app and type the current reading.';
     case 'old': return 'The latest Libre reading is from ' + ageText(result.ageMinutes) + ' – too old to use (more than ' +
       limits.maxAgeMinutes + ' minutes). Check the Libre app and type the current reading.';
     default: return 'Could not use the Libre reading. Type it yourself.';
   }
+}
+
+/* ==========================================================================
+   LIVE LIBRE READINGS – pure functions (tested in tests/calc.test.js)
+   While the calculator is open it asks your Libre relay (see README) for the latest LibreLinkUp
+   reading about once a minute. The readings are a guide only, never a go-ahead to inject.
+   ========================================================================== */
+
+// How far this phone's clock is from the relay's clock (milliseconds), from the relay's "fetchedAt";
+// null when the answer has no usable time.
+function clockSkew(reply, receivedAtMs) {
+  const at = reply && typeof reply.fetchedAt === 'string' ? Date.parse(reply.fetchedAt) : NaN;
+  return Number.isFinite(at) ? receivedAtMs - at : null;
+}
+
+// The relay's answer → the same checks as a Shortcut reading (age, LO/HI, clock).
+// skewMs (from clockSkew): when the phone's clock is more than 2 minutes off, the reading's age cannot be
+// trusted, so it is refused as 'clock'.
+// When the relay could not get a reading: { ok: false, reason: 'relay', relayReason, retryAfter }.
+function checkRelayReply(reply, now, skewMs) {
+  if (!reply || typeof reply !== 'object') return { ok: false, reason: 'relay', relayReason: 'upstream', retryAfter: 0 };
+  if (reply.ok !== true) {
+    return { ok: false, reason: 'relay', relayReason: String(reply.reason || 'upstream'), retryAfter: Number(reply.retryAfter) || 0 };
+  }
+  const text = (v) => (v === null || v === undefined ? '' : String(v));
+  const r = checkLibreReading({ libre: '1', bg: text(reply.bg), ts: text(reply.ts), trend: text(reply.trend) }, now);
+  const limitMs = APP_SETTINGS.libre.futureToleranceMinutes * 60000;
+  if (r.takenAt && typeof skewMs === 'number' && Math.abs(skewMs) > limitMs) return Object.assign({}, r, { ok: false, reason: 'clock' });
+  return r;
+}
+
+// What to do with a reading the relay just sent.
+// box = { reading: text in the Blood Sugar box, libreTakenAt: time of the Libre reading in the box (or null),
+//         autoFill: may fill an empty box by itself (not right after Clear), focused: the box is being typed in,
+//         sheetOpen: a Libre box is showing over the calculator }
+// Returns 'fill' (empty box), 'update' (a newer Libre reading replaces the one in the box),
+// 'remove' (the Libre reading in the box has been replaced by one that cannot be used, e.g. LO or HI),
+// 'offer' (shown on the Libre line, used only when tapped) or 'none'.
+// A reading typed by hand is never changed. Nothing changes while the box is being typed in, except that a
+// Libre reading is still removed when a newer one cannot be used.
+function liveAction(box, result) {
+  if (!result || box.sheetOpen) return 'none';
+  if (box.libreTakenAt instanceof Date) {
+    const newer = result.takenAt instanceof Date && result.takenAt.getTime() > box.libreTakenAt.getTime();
+    if (!newer) return 'none';
+    if (!result.ok) return 'remove';
+    return box.focused ? 'offer' : 'update';
+  }
+  if (!result.ok) return 'none';
+  if (box.reading === '' && box.autoFill && !box.focused) return 'fill';
+  return 'offer';
+}
+
+// The Libre line at the top of the calculator.
+// s = { connected, network (last try had no internet), result (checkRelayReply), inUse (that reading is in the box),
+//       older (the box has a newer Libre reading than this one), arrowDiffers (the arrow in the calculator is not the Libre arrow) }
+// Returns { tone: 'ok' | 'offer' | 'warn' | 'bad' | 'off', before, arrowKey, after, text, label, tap: 'connect' | 'use' | 'refresh' }
+function liveLine(s) {
+  const line = (tone, before, tap, arrowKey, after) => {
+    const arrow = arrowKey ? findArrow(arrowKey) : null;
+    const rest = after || '';
+    return { tone, before, arrowKey: arrow ? arrow.key : null, after: rest,
+      text: before + (arrow ? ' ' + arrow.symbol : '') + rest,
+      label: before + (arrow ? ', ' + arrow.name.toLowerCase() : '') + rest, tap };
+  };
+  if (!s.connected) return line('off', 'Libre: tap to connect live readings', 'connect');
+  if (s.network) return line('off', 'Libre: no internet – type the reading', 'refresh');
+  const r = s.result;
+  if (!r) return line('off', 'Libre: getting the latest reading…', 'refresh');
+
+  if (r.reason === 'relay') {
+    const mins = Math.max(1, Math.ceil((r.retryAfter || 0) / 60));
+    switch (r.relayReason) {
+      case 'key': return line('bad', 'Libre: key not accepted – tap to fix', 'connect');
+      case 'setup': return line('off', 'Libre relay settings missing (Cloudflare)', 'refresh');
+      case 'login': return line('bad', 'Libre: sign-in refused – check the relay', 'refresh');
+      case 'terms': return line('warn', 'Libre: accept the terms in LibreLinkUp', 'refresh');
+      case 'locked':
+      case 'busy': return line('warn', 'Libre: busy – trying again in ' + mins + ' min', 'refresh');
+      case 'no_follow': return line('warn', 'Libre: the account follows nobody yet', 'refresh');
+      case 'many':
+      case 'patient': return line('bad', 'Libre: account follows several people', 'refresh');
+      case 'patient_changed': return line('bad', 'Libre: account follows someone new', 'refresh');
+      case 'no_reading': return line('warn', 'Libre: no reading – check the Libre app', 'refresh');
+      case 'origin': return line('bad', 'Libre relay refused this address', 'refresh');
+      default: return line('off', 'Libre not answering – type the reading', 'refresh');
+    }
+  }
+
+  const arrowKey = r.arrow ? r.arrow.key : null;
+  if (r.ok) {
+    const age = ' · ' + ageText(r.ageMinutes);
+    if (s.inUse) return line('ok', 'Libre ' + r.value, 'refresh', arrowKey, age + (s.arrowDiffers ? ' · check arrow' : ' · in use'));
+    if (s.older) return line('off', 'Libre ' + r.value, 'refresh', arrowKey, age);
+    return line('offer', 'Libre ' + r.value, 'use', arrowKey, age + ' · tap to use');
+  }
+  const limits = APP_SETTINGS.libre;
+  switch (r.reason) {
+    case 'old': return line('warn', 'Libre ' + r.value + ' · ' + ageText(r.ageMinutes).replace(' ago', ' old') + ' – scan the sensor', 'refresh');
+    case 'range': return line('bad', 'Libre shows ' + (r.value < limits.min ? 'LO' : 'HI') + ' – do a finger-prick check', 'refresh');
+    case 'future': return line('warn', 'Libre time is off – type the reading', 'refresh');
+    case 'clock': return line('bad', 'Phone clock is wrong – type the reading', 'refresh');
+    default: return line('warn', 'Libre: no reading – check the Libre app', 'refresh');
+  }
+}
+
+// The relay key is kept on this phone only (never in the app files, which are public)
+const RELAY_KEY_STORE = 'insulin-dose-libre-relay-key';
+function loadRelayKey() {
+  try { return (window.localStorage.getItem(RELAY_KEY_STORE) || '').trim(); } catch (e) { return ''; }
+}
+function saveRelayKey(key) {
+  try {
+    if (key) window.localStorage.setItem(RELAY_KEY_STORE, key);
+    else window.localStorage.removeItem(RELAY_KEY_STORE);
+  } catch (e) { /* private mode: kept until the app closes */ }
 }
 
 /* ==========================================================================
@@ -352,9 +477,25 @@ function initApp() {
   function freshState() {
     const foods = [];
     for (let i = 0; i < APP_SETTINGS.foodRows; i++) foods.push({ name: '', carbs: '' });
-    return { meal: mealForTime(new Date()), reading: '', arrow: null, foods, libreTakenAt: null, libreArrowKey: null };
+    return { meal: mealForTime(new Date()), reading: '', arrow: null, arrowByHand: false, foods, libreTakenAt: null, libreArrowKey: null };
   }
   const state = freshState();
+
+  // Live Libre readings (see the LIVE LIBRE section further down)
+  const live = {
+    url: String(APP_SETTINGS.libreLive.relayUrl || '').trim().replace(/\/+$/, ''),
+    key: loadRelayKey(),
+    reply: null,        // the relay's last answer
+    network: false,     // the last try had no internet (or the relay could not be reached)
+    autoFill: true,     // may fill an empty box by itself – not right after Clear
+    skew: null,         // phone clock minus the relay's clock when that answer came in
+    timer: null,
+    inflight: null,
+    ctrl: null,
+    gen: 0,             // answers from before Connect / Turn off are ignored
+    lastTap: 0,
+    waitUntil: 0
+  };
 
   // Reading sent by the Libre Shortcut in the address (?libre=1&bg=…&ts=…&trend=…)
   let libreSheet = null;
@@ -374,7 +515,10 @@ function initApp() {
     mealGrid: $('meal-grid'),
     mealInfo: $('meal-info'),
     readingBox: $('box-reading'),
+    readingLabel: $('reading-label'),
     reading: $('reading'),
+    title: $('title'),
+    strip: $('libre-line'),
     arrowBox: $('box-arrow'),
     arrowGrid: $('arrow-btns'),
     correction: $('correction'),
@@ -426,7 +570,8 @@ function initApp() {
     b.addEventListener('click', () => {
       closeKeypad();
       state.arrow = state.arrow === arrow.key ? null : arrow.key;
-      state.libreArrowKey = null; // chosen by hand from now on
+      state.arrowByHand = true;   // chosen (or cleared) by hand: Libre leaves the arrow alone from now on
+      state.libreArrowKey = null;
       render();
     });
     els.arrowGrid.appendChild(b);
@@ -440,10 +585,12 @@ function initApp() {
     state.reading = clean;
     if (state.libreTakenAt) {
       // Typed by hand: no longer the Libre reading, so the arrow Libre selected goes too
-      if (state.libreArrowKey && state.arrow === state.libreArrowKey) state.arrow = null;
+      if (!state.arrowByHand && state.libreArrowKey && state.arrow === state.libreArrowKey) state.arrow = null;
       state.libreTakenAt = null;
       state.libreArrowKey = null;
     }
+    // Emptied by hand: like Clear, Libre does not fill it again by itself (tap the Libre line to use a reading)
+    if (clean === '') live.autoFill = false;
     render();
   });
 
@@ -482,6 +629,7 @@ function initApp() {
     state.meal = fresh.meal;
     state.reading = '';
     state.arrow = null;
+    state.arrowByHand = false;
     state.foods = fresh.foods;
     state.libreTakenAt = null;
     state.libreArrowKey = null;
@@ -492,7 +640,12 @@ function initApp() {
     closeKeypad();
     render();
   }
-  els.clear.addEventListener('click', resetAll);
+  els.clear.addEventListener('click', () => {
+    resetAll();
+    // A dose was probably just given: do not fill the box again by itself (tap the Libre line to use a reading)
+    live.autoFill = false;
+    renderLiveLine();
+  });
 
   function isPristine() {
     return !libreSheet && state.reading === '' && !state.arrow &&
@@ -554,10 +707,12 @@ function initApp() {
         state.reading = String(now.value);
         els.reading.value = state.reading;
         state.arrow = now.arrow ? now.arrow.key : null;
+        state.arrowByHand = false;
         state.libreArrowKey = state.arrow;
         state.libreTakenAt = now.takenAt;
         closeLibreSheet();
         render();
+        liveReapply(); // a newer live reading may already be waiting
       });
       buttons.appendChild(use);
       buttons.appendChild(h('button', { type: 'button', text: 'Type it myself' }));
@@ -621,6 +776,7 @@ function initApp() {
     els.mealInfo.textContent = r.mealInfo;
 
     setColours(els.readingBox, r.readingColour);
+    els.readingLabel.textContent = state.libreTakenAt ? 'Blood Sugar (Libre)' : 'Blood Sugar Reading';
 
     arrowBtns.forEach((b) => {
       const on = b.dataset.arrow === state.arrow;
@@ -651,6 +807,7 @@ function initApp() {
       els.carbs[i].classList.toggle('needs', hasName && !hasCarbs);
     });
 
+    renderLiveLine();
     updateHud();
   }
 
@@ -710,6 +867,7 @@ function initApp() {
       hiddenAt = null;
       if (away > APP_SETTINGS.autoClearMinutes * 60000) {
         resetAll();
+        live.autoFill = true; // a new start: the latest Libre reading may fill the box again
         showPage('calc');
       }
     }
@@ -754,29 +912,322 @@ function initApp() {
     }).catch(() => {});
   }
 
+  // Removes a Libre reading that is more than 10 minutes old. Returns its age in minutes (or null).
+  // quiet: no message box yet (used on return to the app while the latest reading is fetched).
+  function expireOldLibre(quiet) {
+    if (!state.libreTakenAt) return null;
+    const ageMinutes = (Date.now() - state.libreTakenAt.getTime()) / 60000;
+    if (ageMinutes <= APP_SETTINGS.libre.maxAgeMinutes) return null;
+    state.reading = '';
+    els.reading.value = '';
+    state.arrow = null; // the arrow belonged to that reading too, even if changed by hand
+    state.arrowByHand = false;
+    state.libreTakenAt = null;
+    state.libreArrowKey = null;
+    closeKeypad();
+    render();
+    if (!quiet) showExpired(ageMinutes);
+    return ageMinutes;
+  }
+
+  function showExpired(ageMinutes) {
+    if (libreSheet && libreSheet.dataset.kind === 'connect') return; // the Libre line says it; keep what is being typed
+    showLibreSheet({ ok: false, reason: 'expired', ageMinutes });
+  }
+
   function checkLibreAge() {
     if (libreSheet && libreSheet.dataset.kind === 'offer') {
       showLibreSheet(); // refresh the age text (or show "too old")
     }
-    if (state.libreTakenAt) {
-      const ageMinutes = (Date.now() - state.libreTakenAt.getTime()) / 60000;
-      if (ageMinutes > APP_SETTINGS.libre.maxAgeMinutes) {
-        state.reading = '';
-        els.reading.value = '';
-        state.arrow = null; // the arrow belonged to that reading too, even if changed by hand
-        state.libreTakenAt = null;
-        state.libreArrowKey = null;
-        closeKeypad();
-        render();
-        showLibreSheet({ ok: false, reason: 'expired', ageMinutes });
-      }
-    }
+    expireOldLibre(false);
+    renderLiveLine(); // keeps "x min ago" up to date
   }
   setInterval(checkLibreAge, 30000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkLibreAge(); });
+
+  /* ---- LIVE LIBRE: while the calculator is open, ask the relay for the latest reading about once a minute ---- */
+  function liveConfigured() { return live.url !== ''; }
+  function liveOn() { return liveConfigured() && live.key !== ''; }
+
+  function liveBox() {
+    return {
+      reading: state.reading,
+      libreTakenAt: state.libreTakenAt,
+      autoFill: live.autoFill,
+      focused: document.activeElement === els.reading,
+      sheetOpen: !!libreSheet
+    };
+  }
+
+  function liveSchedule() {
+    clearTimeout(live.timer);
+    live.timer = null;
+    if (!liveOn() || document.hidden) return;
+    const wait = Math.max(APP_SETTINGS.libreLive.everySeconds * 1000, live.waitUntil - Date.now());
+    live.timer = setTimeout(() => { liveFetch(); }, wait);
+  }
+
+  function liveFetch() {
+    if (!liveOn()) return Promise.resolve();
+    if (live.inflight) return live.inflight;
+    if (Date.now() < live.waitUntil) { liveSchedule(); return Promise.resolve(); }
+    const gen = live.gen;
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timeout = setTimeout(() => { if (ctrl) ctrl.abort(); }, APP_SETTINGS.libreLive.timeoutSeconds * 1000);
+    const request = fetch(live.url + '/latest', {
+      method: 'GET',
+      headers: { Authorization: 'Bearer ' + live.key },
+      cache: 'no-store',
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      signal: ctrl ? ctrl.signal : undefined
+    })
+      .then((res) => res.json().catch(() => null))
+      .then((reply) => {
+        if (gen !== live.gen) return; // asked before Connect / Turn off: ignore
+        live.network = false;
+        liveReceive(reply, Date.now());
+      }, () => {
+        if (gen === live.gen) live.network = true;
+      })
+      .catch(() => { /* never let one bad answer stop the checks */ })
+      .then(() => {
+        clearTimeout(timeout);
+        if (live.inflight === request) {
+          live.inflight = null;
+          live.ctrl = null;
+        }
+        if (gen === live.gen) {
+          renderLiveLine();
+          liveSchedule();
+        }
+      });
+    live.inflight = request;
+    live.ctrl = ctrl;
+    renderLiveLine();
+    return request;
+  }
+
+  // After Connect or Turn off: forget any answer already on its way
+  function liveRestart() {
+    live.gen++;
+    if (live.ctrl) live.ctrl.abort();
+    live.inflight = null;
+    live.ctrl = null;
+    clearTimeout(live.timer);
+    live.reply = null;
+    live.skew = null;
+    live.network = false;
+    live.waitUntil = 0;
+  }
+
+  function liveReceive(reply, receivedAt) {
+    live.reply = reply;
+    live.skew = clockSkew(reply, receivedAt);
+    const result = checkRelayReply(reply, new Date(), live.skew);
+    if (result.reason === 'relay' && result.retryAfter > 0) live.waitUntil = Date.now() + result.retryAfter * 1000;
+    liveApply(result);
+  }
+
+  function liveApply(result) {
+    const action = liveAction(liveBox(), result);
+    if (action === 'fill') useLibreReading(result, false);
+    else if (action === 'update') useLibreReading(result, true);
+    else if (action === 'remove') removeLibreReading(result);
+  }
+
+  // Applies the last answer again (e.g. right after the Shortcut box closes)
+  function liveReapply() {
+    if (!liveOn()) return;
+    const r = liveResultNow();
+    if (r) liveApply(r);
+    renderLiveLine();
+  }
+
+  // Puts a Libre reading in the box. The Libre arrow comes with it unless an arrow was chosen (or cleared) by hand.
+  function useLibreReading(result, isUpdate) {
+    state.reading = String(result.value);
+    els.reading.value = state.reading;
+    if (!state.arrowByHand) {
+      state.arrow = result.arrow ? result.arrow.key : null;
+      state.libreArrowKey = state.arrow;
+    }
+    state.libreTakenAt = result.takenAt;
+    render();
+    if (isUpdate) {
+      els.readingBox.classList.remove('libre-new');
+      void els.readingBox.offsetWidth; // restart the highlight
+      els.readingBox.classList.add('libre-new');
+    }
+  }
+
+  // A newer Libre reading cannot be used (LO, HI, clock): the older one leaves the calculator too
+  function removeLibreReading(result) {
+    state.reading = '';
+    els.reading.value = '';
+    state.arrow = null; // the arrow belonged to that reading too
+    state.arrowByHand = false;
+    state.libreTakenAt = null;
+    state.libreArrowKey = null;
+    closeKeypad();
+    render();
+    showLibreSheet(result);
+  }
+
+  function liveResultNow() {
+    return live.reply ? checkRelayReply(live.reply, new Date(), live.skew) : null;
+  }
+
+  function renderLiveLine() {
+    if (!els.strip) return;
+    if (!liveConfigured()) {
+      els.strip.hidden = true;
+      els.title.classList.remove('title-off');
+      return;
+    }
+    els.title.classList.add('title-off'); // still there for screen readers
+    els.strip.hidden = false;
+    const r = liveResultNow();
+    const boxTime = state.libreTakenAt ? state.libreTakenAt.getTime() : null;
+    const inUse = !!(r && r.ok && boxTime !== null && r.takenAt.getTime() === boxTime);
+    const s = liveLine({
+      connected: liveOn(),
+      network: live.network,
+      result: r,
+      inUse,
+      older: !!(r && r.ok && boxTime !== null && r.takenAt.getTime() < boxTime),
+      arrowDiffers: inUse && !!r.arrow && state.arrow !== r.arrow.key
+    });
+    const strip = els.strip;
+    strip.className = 'libre-line tone-' + s.tone + (live.inflight ? ' busy' : '');
+    strip.dataset.tap = s.tap;
+    strip.setAttribute('aria-label', s.label);
+    strip.textContent = '';
+    strip.appendChild(h('span', { class: 'll-dot', 'aria-hidden': 'true' }));
+    const text = h('span', { class: 'll-text', 'aria-hidden': 'true' }, [s.before]);
+    if (s.arrowKey) {
+      text.appendChild(document.createTextNode(' '));
+      text.appendChild(arrowIcon(s.arrowKey));
+    }
+    if (s.after) text.appendChild(document.createTextNode(s.after));
+    strip.appendChild(text);
+  }
+
+  if (els.strip) {
+    els.strip.addEventListener('click', () => {
+      closeKeypad();
+      const tap = els.strip.dataset.tap;
+      if (tap === 'connect') { openConnectSheet(); return; }
+      if (tap === 'use') {
+        const r = liveResultNow();
+        const boxTime = state.libreTakenAt ? state.libreTakenAt.getTime() : null;
+        if (r && r.ok && !libreSheet && (boxTime === null || r.takenAt.getTime() > boxTime)) {
+          live.autoFill = true;
+          state.arrowByHand = false; // asked for the Libre reading: its arrow comes too (check it)
+          useLibreReading(r, false);
+          return;
+        }
+      }
+      if (Date.now() - live.lastTap < APP_SETTINGS.libreLive.minTapSeconds * 1000) return;
+      live.lastTap = Date.now();
+      live.waitUntil = 0;
+      liveFetch();
+    });
+  }
+
+  // Connect (or change the key / turn off) – with the reminder that the reading is only a guide
+  function openConnectSheet() {
+    if (libreSheet) libreSheet.remove();
+    closeKeypad();
+    const card = h('div', { class: 'libre-card' });
+    card.appendChild(h('h2', { id: 'libre-title', text: 'Live Libre readings' }));
+    card.appendChild(h('p', { class: 'libre-info', text: 'While the calculator is open it gets the latest LibreLinkUp reading about once a minute and puts it in the Blood Sugar box with the Libre arrow. When a newer reading comes, the box and the Total update by themselves.' }));
+    card.appendChild(h('p', { class: 'libre-warn', text: 'A guide only – not a go-ahead to inject. Libre readings can be late, missing or wrong. Before every dose check the reading in the Libre app (or do a finger-prick check) and the dose against the written plan. The person giving the insulin is always responsible for the final dose.' }));
+    card.appendChild(h('label', { class: 'libre-key-label', for: 'libre-key', text: 'Relay key (RELAY_KEY)' }));
+    const input = h('input', {
+      id: 'libre-key', class: 'libre-key', type: 'text', maxlength: '200', autocomplete: 'off',
+      autocorrect: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: 'Paste the key here'
+    });
+    input.value = live.key;
+    card.appendChild(input);
+    const problem = h('p', { class: 'libre-problem', hidden: '' });
+    card.appendChild(problem);
+
+    const buttons = h('div', { class: 'libre-btns' });
+    const connect = h('button', { type: 'button', class: 'primary', text: 'I understand – connect' });
+    connect.addEventListener('click', () => {
+      const key = input.value.trim();
+      if (key.length < 16) {
+        problem.textContent = 'That key is too short. Copy the whole RELAY_KEY.';
+        problem.hidden = false;
+        return;
+      }
+      liveRestart();
+      live.key = key;
+      saveRelayKey(key);
+      live.autoFill = true;
+      closeLibreSheet();
+      renderLiveLine();
+      renderHelpLive();
+      liveFetch();
+    });
+    buttons.appendChild(connect);
+    if (live.key) {
+      const off = h('button', { type: 'button', text: 'Turn off on this phone' });
+      off.addEventListener('click', () => {
+        liveRestart();
+        live.key = '';
+        saveRelayKey('');
+        closeLibreSheet();
+        renderLiveLine();
+        renderHelpLive();
+      });
+      buttons.appendChild(off);
+    }
+    const later = h('button', { type: 'button', text: 'Not now' });
+    later.addEventListener('click', closeLibreSheet);
+    buttons.appendChild(later);
+    card.appendChild(buttons);
+
+    libreSheet = h('div', { class: 'libre-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'libre-title' }, [card]);
+    libreSheet.dataset.kind = 'connect';
+    document.getElementById('app').appendChild(libreSheet);
+    input.focus();
+  }
+
+  // Status and button on the Instructions page
+  function renderHelpLive() {
+    const status = $('libre-live-status');
+    const btn = $('libre-live-btn');
+    if (!status || !btn) return;
+    status.textContent = liveOn() ? 'On this phone: connected.' : 'On this phone: not connected.';
+    btn.textContent = liveOn() ? 'Change the key or turn off' : 'Connect live Libre readings';
+  }
+  if ($('libre-live-btn')) {
+    $('libre-live-btn').addEventListener('click', () => { showPage('calc'); openConnectSheet(); });
+    renderHelpLive();
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      clearTimeout(live.timer);
+      return;
+    }
+    if (!liveOn()) { checkLibreAge(); return; }
+    // An old reading leaves the calculator straight away; the message waits until Libre has been asked,
+    // because a newer reading may fill the box again
+    if (libreSheet && libreSheet.dataset.kind === 'offer') showLibreSheet();
+    const expiredAge = expireOldLibre(true);
+    const since = Date.now();
+    liveFetch().then(() => {
+      if (expiredAge !== null && !state.libreTakenAt) showExpired(expiredAge + (Date.now() - since) / 60000);
+      checkLibreAge();
+    });
+  });
+  window.addEventListener('online', () => { if (liveOn()) liveFetch(); });
 
   render();
   showLibreSheet();
+  liveFetch();
 }
 
 /* ---- Trend arrow icon: one arrow shape turned to the angle the Libre app uses,
@@ -883,14 +1334,33 @@ function buildHelpPage(root) {
   root.appendChild(h('h3', { text: 'How to use' }));
   root.appendChild(h('ol', { class: 'steps' }, [
     'Check the Meal Time. Breakfast, Lunch, Dinner or Bedtime is picked from the phone’s clock – tap another one to change it.',
-    'Type the Blood Sugar Reading (mg/dL). If you opened the calculator with the Libre Shortcut, check the reading and its time in the box that appears, then tap Use this reading.',
-    'Tap the same trend arrow the Libre app shows. Tap it again to clear it. Leave it blank if there is no arrow.',
+    'Check the Blood Sugar Reading (mg/dL). With live Libre readings it is filled in from Libre – check it matches the Libre app. Otherwise type it (or use the box the Libre Shortcut shows).',
+    'Check the trend arrow matches the Libre app (live Libre readings select it for you). Tap an arrow to change it; tap it again to clear it. Leave it blank if there is no arrow.',
     'For each food type its name and its carbs in grams. A row only counts when both are filled in (an orange dashed box means something is missing).',
     'Read the yellow TOTAL and the message just under it. Check against the written plan before injecting.',
     'Tap Clear before the next reading. The app also clears itself after ' + APP_SETTINGS.autoClearMinutes + ' minutes in the background.'
   ].map((t) => h('li', { text: t }))));
 
   const libre = APP_SETTINGS.libre;
+  const liveSet = String(APP_SETTINGS.libreLive.relayUrl || '').trim() !== '';
+  root.appendChild(h('h3', { text: 'Live Libre readings' }));
+  if (liveSet) {
+    root.appendChild(h('ul', { class: 'reminders' }, [
+      'While the calculator is open and online it gets the latest LibreLinkUp reading about once a minute. When the sensor sends a new reading (or it is scanned), the Blood Sugar box, the arrow and the Total update by themselves and the box flashes blue.',
+      'The line at the top shows the Libre reading, its arrow and how old it is. Tap it to check again now.',
+      'It fills the box when the box is empty and keeps it up to date. A reading you type yourself is never changed – tap the Libre line to use the Libre reading instead. An arrow you choose by hand is kept (the line then says “check arrow” if Libre shows a different one).',
+      'After Clear (or emptying the box by hand) the box stays empty until you tap the Libre line, so a dose that was just given is not worked out again by itself.',
+      'While the keypad is open for the Blood Sugar box nothing in it changes; a newer reading waits on the Libre line.',
+      'Readings older than ' + libre.maxAgeMinutes + ' minutes, LO and HI are never used. If Libre stops sending readings, the last one is removed once it is more than ' + libre.maxAgeMinutes + ' minutes old.',
+      'LibreLinkUp is used in an unofficial way and can be a few minutes behind the Libre app or stop working at any time. Then type the reading as before.'
+    ].map((t) => h('li', { text: t }))));
+    root.appendChild(h('p', { class: 'disclaimer', text: 'Live Libre readings are a guide only – not a go-ahead to inject. Before every dose check the reading in the Libre app (or do a finger-prick check) and the dose against the written plan. The person giving the insulin is always responsible for the final dose.' }));
+    root.appendChild(h('p', { class: 'note', id: 'libre-live-status' }));
+    root.appendChild(h('button', { type: 'button', class: 'doc-btn', id: 'libre-live-btn', text: 'Connect live Libre readings' }));
+  } else {
+    root.appendChild(h('p', { class: 'note', text: 'Not set up in this copy of the calculator (see “Live Libre readings” in the README).' }));
+  }
+
   root.appendChild(h('h3', { text: 'Reading from Libre (Shortcut)' }));
   root.appendChild(h('ul', { class: 'reminders' }, [
     'The Libre Shortcut gets the latest reading from LibreLinkUp and opens the calculator with a box showing the reading and when it was taken.',
@@ -912,7 +1382,9 @@ function buildHelpPage(root) {
 
   root.appendChild(h('p', { class: 'disclaimer', text: p.disclaimer }));
   const about = h('p', { class: 'note' }, [
-    'Works offline. Nothing is saved or sent anywhere. Plan: ' + p.planTitle + '. Offline copy: '
+    (liveSet
+      ? 'Works offline (live Libre readings need internet). The only thing sent anywhere is the request to your Libre relay for the latest reading; the only thing saved on this phone is the relay key. '
+      : 'Works offline. Nothing is saved or sent anywhere. ') + 'Plan: ' + p.planTitle + '. Offline copy: '
   ]);
   about.appendChild(h('span', { id: 'cache-version', text: 'not saved yet' }));
   about.appendChild(document.createTextNode('.'));
@@ -928,6 +1400,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     DOSE_PLAN, APP_SETTINGS, toNumber, roundHalfUp, formatUnits, findMeal, findArrow, arrowAdjustment,
     correctionRow, correctionDose, foodDose, messageFor, readingColour, arrowColour, mealForTime,
-    mealInfoText, calculate, libreArrow, parseLibreTime, checkLibreReading, ageText, libreProblemText
+    mealInfoText, calculate, libreArrow, parseLibreTime, checkLibreReading, ageText, libreProblemText,
+    clockSkew, checkRelayReply, liveAction, liveLine
   };
 }

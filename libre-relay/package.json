@@ -1,0 +1,6 @@
+{
+  "name": "libre-relay",
+  "private": true,
+  "description": "Cloudflare Worker that gives the Insulin Dose Calculator the latest LibreLinkUp reading. Copy worker.js into the Cloudflare dashboard (see README).",
+  "type": "module"
+}

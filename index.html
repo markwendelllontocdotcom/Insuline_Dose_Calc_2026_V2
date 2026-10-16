@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-title" content="Insulin Dose">
   <meta name="format-detection" content="telephone=no">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' https://*.workers.dev; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'">
   <title>Insulin Dose Calculator</title>
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -33,7 +33,9 @@
   <!-- ===== Calculator (one screen, no scrolling) ===== -->
   <main class="page page-calc" id="page-calc" data-page="calc">
 
-    <h1 class="title">Insulin Dose Calculator</h1>
+    <h1 class="title" id="title">Insulin Dose Calculator</h1>
+    <!-- Live Libre readings: replaces the title when a Libre relay is set up (see README) -->
+    <button type="button" class="libre-line" id="libre-line" hidden></button>
 
     <section class="total" id="total-box" aria-live="polite">
       <p class="total-label"><strong>TOTAL INSULIN UNITS</strong> to be injected to maintain acceptable Sugar level</p>
@@ -51,7 +53,7 @@
 
     <section class="boxes">
       <div class="box box-reading" id="box-reading">
-        <label class="box-h" for="reading">Blood Sugar Reading</label>
+        <label class="box-h" id="reading-label" for="reading">Blood Sugar Reading</label>
         <label class="box-b reading-body" for="reading">
           <input class="reading-input" id="reading" type="text" inputmode="numeric" pattern="[0-9]*"
                  maxlength="3" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done"
