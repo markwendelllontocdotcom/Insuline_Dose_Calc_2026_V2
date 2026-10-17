@@ -33,9 +33,10 @@ const SHORT_BLOCK_MS = 2 * 60 * 1000;      // "too many requests" or terms to ac
 const UPSTREAM_BLOCK_MS = 3 * 60 * 1000;   // LibreLinkUp not answering as expected
 const SESSION_RENEW_MS = 10 * 60 * 1000;   // sign in again when the token has less than 10 min left
 const KV_SESSION = 'llu-session-v1';
-const KV_BLOCK = 'llu-block-v1';
+const KV_BLOCK = 'llu-block-v2';
 const KV_HOST = 'llu-host-v1';
 const KV_PATIENT = 'llu-patient-v1';
+const KV_LAST = 'llu-last-v1';   // last problem with LibreLinkUp (no personal data), shown on the info page
 const KEEP_SECONDS = 365 * 24 * 3600;
 const MIN_KEY_LENGTH = 16;
 
@@ -74,7 +75,7 @@ export async function handle(request, env, nowMs) {
     });
   }
 
-  if (url.pathname === '/' && request.method === 'GET') return infoPage(env);
+  if (url.pathname === '/' && request.method === 'GET') return await infoPage(env);
   if (url.pathname !== '/latest') return json({ ok: false, reason: 'not_found' }, 404, cors);
   if (request.method !== 'GET') return json({ ok: false, reason: 'method' }, 405, cors);
   if (origin && origin !== allowedOrigin(env)) return json({ ok: false, reason: 'origin' }, 403, cors);
@@ -91,9 +92,29 @@ export async function handle(request, env, nowMs) {
 
 async function latestReading(env, now) {
   if (memory.reading && now - memory.reading.at < READING_CACHE_MS) return memory.reading.body;
+  lastCall = null;
   const body = await fetchLatest(env, now);
   memory.reading = { at: now, body };
+  await recordOutcome(env, body, now);
   return body;
+}
+
+// What LibreLinkUp last answered, as a short safe summary (no tokens, no names, no readings)
+let lastCall = null;
+
+// Keeps the last problem in KV so the info page can show it; one write per problem, one when it works again
+async function recordOutcome(env, body, now) {
+  try {
+    if (body.ok) {
+      const prev = await kvGet(env, KV_LAST);
+      if (prev && !prev.ok) await kvPut(env, KV_LAST, { ok: true, at: new Date(now).toISOString() }, KEEP_SECONDS);
+      return;
+    }
+    if (!lastCall) return; // answered from a pause: nothing new to note
+    const note = Object.assign({ ok: false, at: new Date(now).toISOString(), reason: body.reason }, lastCall);
+    console.log('LibreLinkUp problem: ' + JSON.stringify(note));
+    await kvPut(env, KV_LAST, note, KEEP_SECONDS);
+  } catch (e) { /* never let the note break the answer */ }
 }
 
 async function fetchLatest(env, now) {
@@ -118,7 +139,7 @@ async function fetchLatest(env, now) {
       signedInNow = true;
     }
 
-    const res = await callLLU(session.host + '/llu/connections', { headers: headers(cfg, session) });
+    const res = await callLLU('connections', session.host + '/llu/connections', { headers: headers(cfg, session) });
     if (res.status === 401) {
       await dropSession(env);
       // A token we just got is refused: something changed at LibreLinkUp – pause instead of signing in again and again
@@ -187,7 +208,7 @@ async function signIn(env, cfg, cred, now) {
   const saved = await kvGet(env, KV_HOST);
   let host = regionHost(env.LLU_REGION) || (saved && saved.cred === cred && regionHost(saved.region)) || 'https://api.libreview.io';
   for (let hop = 0; hop < 3; hop++) {
-    const res = await callLLU(host + '/llu/auth/login', {
+    const res = await callLLU('sign-in', host + '/llu/auth/login', {
       method: 'POST',
       headers: headers(cfg, null),
       body: JSON.stringify({ email: String(env.LLU_EMAIL).trim(), password: String(env.LLU_PASSWORD) })
@@ -265,7 +286,8 @@ function headers(cfg, session) {
     'content-type': 'application/json',
     'cache-control': 'no-cache',
     product: cfg.product,
-    version: cfg.version
+    version: cfg.version,
+    'user-agent': 'LibreLinkUp/' + cfg.version
   };
   if (session) {
     h.authorization = 'Bearer ' + session.token;
@@ -274,21 +296,37 @@ function headers(cfg, session) {
   return h;
 }
 
-// Returns { ok, status, body, busy, version }
-async function callLLU(url, init) {
+// Returns { ok, status, body, busy, version }. Also keeps a short safe summary in lastCall.
+async function callLLU(step, url, init) {
   let res;
   try {
     res = await fetch(url, init);
   } catch (e) {
+    lastCall = { step, http: 0, status: null, message: 'no connection: ' + cleanText(e && e.message) };
     return { ok: false, status: 0, body: null };
   }
+  let text = '';
+  try { text = await res.text(); } catch (e) { text = ''; }
   let body = null;
-  try { body = await res.json(); } catch (e) { body = null; }
+  try { body = JSON.parse(text); } catch (e) { body = null; }
+  lastCall = {
+    step,
+    http: res.status,
+    status: body && body.status !== undefined ? body.status : null,
+    message: body
+      ? cleanText(body.message || (body.error && body.error.message) || (body.data && (body.data.message || (body.data.step && body.data.step.type))) || '')
+      : cleanText(((/<title[^>]*>([^<]*)<\/title>/i.exec(text) || [])[1]) || text.slice(0, 80))
+  };
   const out = { ok: res.ok, status: res.status, body };
   if (res.status === 429 || res.status === 430) out.busy = true;
   const min = body && body.status === 920 && body.data && body.data.minimumVersion;
   if (min && /^\d+(\.\d+){1,3}$/.test(String(min))) out.version = String(min);
   return out;
+}
+
+// Short, plain text for the info page (letters, numbers and simple punctuation only)
+function cleanText(t) {
+  return String(t || '').replace(/[^A-Za-z0-9 .,:;'()\/_-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
 }
 
 function regionHost(region) {
@@ -372,7 +410,7 @@ function randomKey() {
 }
 
 // What you see when you open the Worker's address in a browser (never shows any reading)
-function infoPage(env) {
+async function infoPage(env) {
   const missing = missingSettings(env);
   const shortKey = relayKey(env) !== '' && relayKey(env).length < MIN_KEY_LENGTH;
   const lines = ['Libre relay for the Insulin Dose Calculator', ''];
@@ -384,6 +422,15 @@ function infoPage(env) {
   }
   lines.push('', 'Calculator address allowed: ' + allowedOrigin(env));
   lines.push('KV binding LIBRE_KV: ' + (env.LIBRE_KV ? 'yes' : 'MISSING'));
+  const last = await kvGet(env, KV_LAST);
+  if (last && last.ok) lines.push('', 'LibreLinkUp: working again since ' + last.at + ' (UTC).');
+  else if (last) {
+    lines.push('', 'Last LibreLinkUp problem (' + last.at + ', UTC): ' + last.reason + ' at ' + last.step +
+      ' – HTTP ' + last.http + (last.status !== null && last.status !== undefined ? ', status ' + last.status : '') +
+      (last.message ? ', "' + last.message + '"' : ''));
+  } else {
+    lines.push('', 'LibreLinkUp: no problems noted.');
+  }
   return new Response(lines.join('\n') + '\n', {
     status: 200,
     headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }

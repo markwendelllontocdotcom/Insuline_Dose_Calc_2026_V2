@@ -332,3 +332,34 @@ test('Relay: the address on its own shows set-up help and never a reading', asyn
   res = await handle(req({ path: '/other' }), baseEnv(), T0);
   assert.equal(res.status, 404);
 });
+
+test('Relay: the info page shows the last LibreLinkUp problem (no secrets) and when it works again', async () => {
+  const info = async () => (await handle(new Request('https://libre-relay.example.workers.dev/'), baseEnv(), T0)).text();
+  assert.match(await info(), /LibreLinkUp: no problems noted\./);
+  // LibreLinkUp refuses the brand-new token
+  const normal = normalScript();
+  fakeLibre((call) => (call.url.endsWith('/llu/connections') ? { httpStatus: 401, json: { message: 'AccountIdMismatch' } } : normal(call)));
+  await latest(baseEnv(), T0);
+  let text = await info();
+  assert.match(text, /Last LibreLinkUp problem \(2026-10-16T13:00:00\.000Z, UTC\): upstream at connections – HTTP 401, "AccountIdMismatch"/);
+  assert.doesNotMatch(text, /follower@example\.com|secret-pass|tok-1|Abcdefghijk/);
+  // A page that is not JSON (e.g. "Access denied") is summed up by its title
+  kv = fakeKV(); restart();
+  fakeLibre(() => ({ httpStatus: 403, raw: '<html><head><title>Access Denied</title></head><body>…</body></html>' }));
+  await latest(baseEnv(), T0);
+  assert.match(await info(), /upstream at sign-in – HTTP 403, "Access Denied"/);
+  // Working again: noted once, not on every reading
+  kv = fakeKV(); restart();
+  await kv.put('llu-last-v1', JSON.stringify({ ok: false, at: 'x', reason: 'upstream', step: 'sign-in', http: 403, status: null, message: 'Access Denied' }));
+  const calls = fakeLibre(normalScript());
+  let writes = 0;
+  const put = kv.put.bind(kv);
+  kv.put = async (k, v) => { if (k === 'llu-last-v1') writes++; return put(k, v); };
+  await latest(baseEnv(), T0);
+  await latest(baseEnv(), T0 + 61000);
+  await latest(baseEnv(), T0 + 122000);
+  assert.equal(writes, 1);
+  assert.match(await info(), /LibreLinkUp: working again since 2026-10-16T13:00:00\.000Z/);
+  // The relay says who it is to LibreLinkUp
+  assert.equal(calls[0].headers['user-agent'], 'LibreLinkUp/4.16.0');
+});
