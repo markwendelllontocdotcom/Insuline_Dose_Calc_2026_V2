@@ -115,7 +115,7 @@ const APP_SETTINGS = {
   libre: { maxAgeMinutes: 10, futureToleranceMinutes: 2, min: 40, max: 500 },
   // Live Libre readings through your Libre relay (see README). Leave relayUrl empty to switch this off.
   libreLive: {
-    relayUrl: '',          // your relay's address, e.g. 'https://libre-relay.YOUR-NAME.workers.dev'
+    relayUrl: 'https://libre-relay.markwendell-lontoc.workers.dev', // your Libre relay ('' switches live readings off)
     everySeconds: 60,      // how often to ask while the calculator is open
     timeoutSeconds: 15,    // give up on one try after this long
     minTapSeconds: 5       // tapping the Libre line asks again at most this often

@@ -5,7 +5,7 @@
  * When you change anything in the app (for example the numbers in DOSE_PLAN),
  * change CACHE_VERSION below (v1 → v2 → v3 …) or phones will keep the old version.
  */
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const CACHE_NAME = 'insulin-dose-' + CACHE_VERSION;
 
 const APP_FILES = [
