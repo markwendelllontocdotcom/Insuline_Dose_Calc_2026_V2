@@ -467,6 +467,16 @@ p, h1, h2, h3 { margin: 0; }
   border-radius: 9px;
   font-weight: 800;
 }
+.doc .credits {
+  margin: 18px 0 4px;
+  padding-top: 12px;
+  border-top: 1px solid #666;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+}
+.doc .credits p:first-child { font-weight: 800; }
+.doc .credits .nowrap { white-space: nowrap; }
 .tbl-wrap { overflow-x: auto; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.2; }
 .tbl th, .tbl td { border: 1px solid #000; padding: 6px 4px; text-align: center; }

@@ -137,13 +137,13 @@ If the calculator is on a different GitHub account, also add a **Text** variable
 
 ### 3. Point the calculator at the relay
 
-Do this **before** uploading the files to GitHub:
-
-1. In the unzipped folder open `app.js` in Notepad. Near the top find `relayUrl: '',`
+1. On GitHub open `app.js` and click the pencil icon. Near the top find `relayUrl: '',`
 2. Put the relay's address between the two quotes, for example
-   `relayUrl: 'https://libre-relay.YOUR-NAME.workers.dev',` (no `/` at the end). Save.
-3. Upload the files to GitHub as described above. If you change `relayUrl` later on GitHub, also raise
-   `CACHE_VERSION` in `service-worker.js` by one, or phones keep the old version.
+   `relayUrl: 'https://libre-relay.YOUR-NAME.workers.dev',` (no `/` at the end). Click **Commit changes**.
+3. Open `service-worker.js` the same way and raise `CACHE_VERSION` by one (for example `v10` to `v11`).
+   Commit. Without this step phones keep the old version.
+
+(If you upload the files from your computer instead, make the same change in `app.js` with Notepad before uploading.)
 
 The address must end in `.workers.dev`. (The page only allows that kind of address. To use another address,
 add it to `connect-src` in the security line at the top of `index.html`.)
@@ -279,7 +279,8 @@ If the Shortcut stops with an error (for example no internet), open the calculat
 ## Changing the plan later
 
 1. On GitHub open `app.js`, click the pencil icon and change the numbers in `DOSE_PLAN`
-   (and `planTitle` if the plan has a new name or year). Click **Commit changes**.
+   (and `planTitle` if the plan has a new name or year). Also update `version` and `date` in `APP_INFO`
+   (shown under **Instructions** → **About**). Click **Commit changes**.
 2. Open `service-worker.js` the same way and raise `CACHE_VERSION` by one (for example `v4` to `v5`).
    Commit. Without this step phones keep the old version.
 3. On the iPhone open the app while online. It updates itself when nothing has been typed yet;
@@ -296,3 +297,20 @@ Run it from this folder. The tests cover the required cases, every correction ba
 the arrows, the rounding, the colours, the messages, the clock-based meal time, the Libre reading checks,
 the live Libre rules (fill, update, never change a typed reading, nothing by itself after Clear, LO/HI removed)
 and the relay (sign-in, region, headers, key, refused sign-in pause, one child only) against a pretend LibreLinkUp.
+
+## About
+
+**Insulin Dose Calculator** – Version 2.1 · 17 Oct 2026
+
+What is new in 2.1:
+- Live Libre readings (optional; they need the Libre relay described above).
+- An **About** section with the credits at the end of the **Instructions** tab.
+- The Libre Shortcut address now points at the V2 site.
+
+The version and date shown in the app come from `APP_INFO` near the top of `app.js`.
+
+FreeStyle Libre, LibreLinkUp and LibreView are trademarks of Abbott. This app is not made by or connected with Abbott.
+
+Developed by Mark Lontoc | Dubai, United Arab Emirates
+
+© 2026 MLWorks. All rights reserved | Version 2.1 · 17 Oct 2026

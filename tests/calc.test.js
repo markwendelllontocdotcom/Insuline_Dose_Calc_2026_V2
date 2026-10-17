@@ -562,3 +562,12 @@ test('Live Libre: a phone clock more than 2 minutes off means the reading is not
   const box = { reading: '140', libreTakenAt: t(30), autoFill: true, focused: false, sheetOpen: false };
   assert.equal(liveAction(box, slow), 'remove');
 });
+
+test('About: credits and version', () => {
+  assert.deepEqual(app.creditLines(), [
+    'Developed by Mark Lontoc | Dubai, United Arab Emirates',
+    '© 2026 MLWorks. All rights reserved | Version ' + app.APP_INFO.version + ' · ' + app.APP_INFO.date
+  ]);
+  assert.match(app.APP_INFO.version, /^\d+\.\d+(\.\d+)?$/);
+  assert.match(app.APP_INFO.date, /^\d{1,2} [A-Z][a-z]{2} \d{4}$/);
+});

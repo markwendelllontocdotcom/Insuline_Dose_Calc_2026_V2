@@ -122,6 +122,20 @@ const APP_SETTINGS = {
   }
 };
 
+// About this app (Instructions tab → About). Change version and date with every release.
+const APP_INFO = {
+  name: 'Insulin Dose Calculator',
+  version: '2.1',
+  date: '17 Oct 2026',
+  developer: 'Developed by Mark Lontoc | Dubai, United Arab Emirates',
+  copyright: '© 2026 MLWorks. All rights reserved'
+};
+
+// The two credit lines, e.g. "© 2026 MLWorks. All rights reserved | Version 2.1 · 17 Oct 2026"
+function creditLines() {
+  return [APP_INFO.developer, APP_INFO.copyright + ' | Version ' + APP_INFO.version + ' · ' + APP_INFO.date];
+}
+
 // The arrow for a LibreLinkUp TrendArrow number (1–5), or null. It is shown in the Libre box but NOT
 // selected automatically – the arrow is still tapped by hand in the calculator.
 function libreArrow(trend) {
@@ -1381,6 +1395,10 @@ function buildHelpPage(root) {
   ].map((t) => h('li', { text: t }))));
 
   root.appendChild(h('p', { class: 'disclaimer', text: p.disclaimer }));
+
+  root.appendChild(h('h3', { text: 'About' }));
+  root.appendChild(h('p', { text: APP_INFO.name + ' – a helper that works out the insulin dose from the ' + p.planTitle +
+    ', the same way as the Excel calculator.' }));
   const about = h('p', { class: 'note' }, [
     (liveSet
       ? 'Works offline (live Libre readings need internet). The only thing sent anywhere is the request to your Libre relay for the latest reading; the only thing saved on this phone is the relay key. '
@@ -1389,6 +1407,12 @@ function buildHelpPage(root) {
   about.appendChild(h('span', { id: 'cache-version', text: 'not saved yet' }));
   about.appendChild(document.createTextNode('.'));
   root.appendChild(about);
+  root.appendChild(h('p', { class: 'note', text: 'FreeStyle Libre, LibreLinkUp and LibreView are trademarks of Abbott. This app is not made by or connected with Abbott.' }));
+  // Same text as creditLines(); the version and date are kept together on one line
+  root.appendChild(h('div', { class: 'credits' }, [
+    h('p', { text: APP_INFO.developer }),
+    h('p', null, [APP_INFO.copyright + ' | ', h('span', { class: 'nowrap', text: 'Version ' + APP_INFO.version + ' · ' + APP_INFO.date })])
+  ]));
 }
 
 /* ---- Start (browser) / export (tests) ---- */
@@ -1401,6 +1425,6 @@ if (typeof module !== 'undefined' && module.exports) {
     DOSE_PLAN, APP_SETTINGS, toNumber, roundHalfUp, formatUnits, findMeal, findArrow, arrowAdjustment,
     correctionRow, correctionDose, foodDose, messageFor, readingColour, arrowColour, mealForTime,
     mealInfoText, calculate, libreArrow, parseLibreTime, checkLibreReading, ageText, libreProblemText,
-    clockSkew, checkRelayReply, liveAction, liveLine
+    clockSkew, checkRelayReply, liveAction, liveLine, APP_INFO, creditLines
   };
 }
